@@ -6,7 +6,7 @@ from functools import partial
 
 TOKEN = os.getenv("TOKEN")
 ADMIN_ID = 7397929275
-DATA_FILE = "data.json"
+DATA_FILE = "/mnt/data/data.json"
 PDF_DIR = "pdfs"
 
 bot = telebot.TeleBot(TOKEN)
@@ -438,85 +438,97 @@ def back_to_main(message):
 @bot.message_handler(func=lambda m: True)
 def category_or_pdf_handler(message):
     data = load_data()
+    uid = str(message.chat.id)
     lang = get_lang(message.chat.id)
     text = message.text.strip()
 
-    # 🔙 Orqaga
+    # Foydalanuvchini ro'yxatga olish va dl_count boshlang'ich qiymati
+    if uid not in data["users"]:
+        data["users"][uid] = {"name": message.from_user.first_name, "dl_count": 0}
+        save_data(data)
+
+    # 🔙 Orqaga tugmasi
     if text == STRINGS[lang]["back"]:
         main_menu(message, lang)
         return
 
-    # 📚 Kategoriya bosildi
+    # 📚 Kategoriya tanlandi
     if text in data["categories"]:
         books = data["categories"][text]
-
         if not books:
             bot.send_message(message.chat.id, "Bu kategoriyada PDF mavjud emas!")
             return
-
         markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
         for book in books.keys():
             markup.add(book)
-
         markup.add(STRINGS[lang]["back"])
         bot.send_message(message.chat.id, f"📚 {text} bo'limi:", reply_markup=markup)
         return
 
-       # 📖 PDF bosildi qismida:
+    # 📖 PDF tanlandi
     for cat_name, books in data["categories"].items():
         if text in books:
             book_data = books[text]
             file_id = book_data.get("file_id") if isinstance(book_data, dict) else None
-
             if file_id:
                 try:
-                    # file_id orqali yuborish juda tez ishlaydi
                     bot.send_document(message.chat.id, file_id, caption=f"📖 {text}")
-                    
-                    # Statistika
-                    uid = str(message.from_user.id)
-                    data["users"][uid]["dl_count"] = data["users"][uid].get("dl_count", 0) + 1
+                    # ✅ dl_count oshiriladi
+                    data["users"][uid]["dl_count"] = data["users"][uid].get("dl_count",0) + 1
                     save_data(data)
                 except Exception as e:
-                    bot.send_message(message.chat.id, f"Xato: {e}")
+                    bot.send_message(message.chat.id, f"Y:✅{e}")
             return
-
     # Agar hech narsa topilmasa — jim turadi
 
-# --- Qidirish ---
+# Global set foydalanuvchilar qidiruvini boshqarish uchun
+SEARCH_USERS = set()
+
+# --- Qidiruvni boshlash ---
 @bot.message_handler(func=lambda m: m.text in ["🔍 Qidirish", "🔍 Ҷустуҷӯ"])
 def ask_search(message):
     lang = get_lang(message.chat.id)
     msg = bot.send_message(message.chat.id, STRINGS[lang]["search_prompt"])
-    bot.register_next_step_handler(msg, process_search)
+    # Foydalanuvchini qidiruv jarayonida ekanini belgilaymiz
+    SEARCH_USERS.add(message.chat.id)
 
+# --- Qidiruvni qabul qilish ---
+@bot.message_handler(func=lambda m: m.chat.id in SEARCH_USERS)
+def process_search_wrapper(message):
+    SEARCH_USERS.discard(message.chat.id)  # Foydalanuvchi endi qidiruvda emas
+    process_search(message)                 # Asosiy qidiruv funksiyasini chaqiramiz
+
+# --- Asosiy qidiruv funksiyasi ---
 def process_search(message):
-    query = message.text.lower()
+    query = message.text.strip().lower()
     lang = get_lang(message.chat.id)
+
+    # Kamida 2 harf bo'lishi kerak
     if len(query) < 2:
-        bot.send_message(message.chat.id, "Kamida 2 ta harf yozing!")
+        bot.send_message(message.chat.id, "Kamida 2 ta harf kiriting!")
         return
+
     data = load_data()
     results = []
-    
-    # Kitoblarni qidirish
+
+    # Har bir kategoriya va kitobni tekshiramiz
     for cat, books in data["categories"].items():
-        for b_name in books:
-            if query in b_name.lower():
-                results.append(b_name)
-    
+        for book_name in books.keys():
+            if query in book_name.lower():
+                results.append(book_name)
+
+    # Natija topilmasa
     if not results:
         bot.send_message(message.chat.id, STRINGS[lang]["no_results"])
         return
 
+    # Natijalarni inline tugmalar bilan yuborish
     markup = types.InlineKeyboardMarkup()
-    for b_name in results[:10]:
-        # callback_data max 64 byte. Shuning uchun nomni qisqartiramiz
-        callback_val = f"get_{b_name[:50]}" 
-        markup.add(types.InlineKeyboardButton(text=f"📖 {b_name}", callback_data=callback_val))
-    
-    bot.send_message(message.chat.id, "Natijalar:", reply_markup=markup)
+    for book_name in results[:10]:  # maksimal 10 ta natija
+        callback_val = f"get_{book_name[:50]}"  # callback max 64 byte
+        markup.add(types.InlineKeyboardButton(text=f"📖 {book_name}", callback_data=callback_val))
 
+    bot.send_message(message.chat.id, "Natijalar:", reply_markup=markup)
 
 # --- Inline tugma orqali PDF yuborish ---
 @bot.callback_query_handler(func=lambda call: call.data.startswith("get_"))
